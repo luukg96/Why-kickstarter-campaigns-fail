@@ -1,0 +1,436 @@
+---
+title: "Markdown wkcf"
+author: "Luuk Grandjean"
+date: "2022-11-25"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(warning = FALSE, message = FALSE)
+```
+
+#Libraries
+```{r }
+library(tidyverse)
+library(ggplot2)
+library(dplyr)
+library(fastDummies)
+library(mice)
+library(readr)
+library(texreg)
+library(readxl)
+
+library(summarytools)
+library(class)
+library(caret)
+library(gmodels)
+library(tidytext)
+```
+
+
+#Load data
+```{r}
+
+D_set <- read_excel("Filtered_kickstart_data.xlsx")
+
+```
+#Data understanding
+```{r}
+
+View(D_set)
+
+#Create dataset based on first data analysis ~ See report ch. collect initial data
+Df <- select(D_set,"name","blurb", "goal", "pledged", "state", "country", "currency", "deadline", "launched_at", "category")
+
+#Check data features and NA values
+summary(Df)
+
+# Category contains NA values
+
+#summary for data description - Numeric attributes 
+summarytools::descr(Df$goal)
+summarytools::descr(Df$pledged)
+
+#How many projects failed?
+Df %>%
+  count(state)
+
+#How many countries and occurence?
+Df %>%
+ count(country)
+
+#How many currencies and occurence?
+Df %>%
+ count(currency)
+
+#How many categories and occurence?
+Df %>%
+ count(category)
+
+```
+
+# Overall Data preparation
+```{r}
+#Replace NA in category to unknown
+Df$category <- replace(Df$category, is.na(Df$category), "Unknown")
+unique(Df$category)
+
+#check na values
+sum(is.na(Df$category))
+
+#Create Datediff with funding time in days based on deadline and launched_at
+Df$DateDiff <- round(difftime(Df$deadline, Df$launched_at, "days"),0)
+
+#Check NA values
+sapply(Df, function(x) sum(is.na(x)))
+#there are 2 missing values. 1 in name and 1 in blurb. Let's drop these, since there are only 2.
+Df <- na.omit(Df)
+
+
+```
+
+
+# 1. Analyses why kickstart fundings fail
+
+## 1.1 Word analyses 
+
+### Blurb
+```{r}
+
+blurb_tidy <- Df %>%
+  #Break down blurb sentence into words
+  unnest_tokens("Word", "blurb") %>%
+  # Eliminate all the determiners and conjunctions, adverbs and adjectives
+  anti_join(stop_words, by = c("Word" = "word")) %>%
+  #Prevent 's words to be taken as separate word
+  mutate(Word = str_replace(Word, "'s", ""))
+  
+#Replace accented characters with unnaccented counterparts. Otherwise, for example, ó is seen as a word. 
+blurb_tidy <- blurb_tidy %>%  
+ mutate_if(is.character,
+           function(col) iconv(col, to='ASCII//TRANSLIT'))
+  
+
+#create function to store operations that will be repeated
+word_frequency <- function(x, top = 10)
+  
+  x %>%
+  #Count n words
+  count(Word, sort = TRUE) %>%
+  mutate(Word = factor(Word, levels = rev(unique(Word)))) %>%
+  # Use the "top" variable defined in the function so we can decide how many words we want to use 
+  top_n(top) %>%
+    
+# This will be useful later if we want to use a grouping variable and will do nothing if we don't  
+  ungroup() %>%
+  
+# The graph itself
+  ggplot(mapping = aes(y = tidytext::reorder_within(Word, n, state),x = Word)) +
+  geom_col(show.legend = FALSE) +
+  tidytext::scale_y_reordered() +
+  coord_flip() +
+  facet_wrap(~ state, scales = "free")
+ 
+
+ 
+  labs(x = NULL)
+#---------------------------------------- End of function
+
+
+#Word analyses based only on word frequency
+blurb_tidy %>%
+  group_by(state) %>% 
+  word_frequency(10) 
+ 
+#Word analyses based on TF-IDF to get a better view on the importance of a word
+blurb_tf_idf <-
+  blurb_tidy %>%
+  count(state, Word, sort = TRUE) %>%
+  bind_tf_idf(Word, state, n)
+
+#Visualize
+blurb_tf_idf %>% 
+  arrange(desc(tf_idf)) %>% 
+  # We create the factors as we did previously
+  mutate(Word = factor(Word, levels = rev(unique(Word)))) %>%
+# Select just the top 10 words for each model
+  group_by(state) %>%
+  top_n(10) %>%
+  ungroup() %>%
+# Our Plot
+  ggplot(mapping = aes(x = Word, y = tf_idf, fill = state)) +
+  geom_col(show.legend = FALSE) +
+  labs(x = NULL, y = NULL) +
+  coord_flip() +
+  facet_wrap(~ state, scales = "free_y")
+#> Selecting by tf_idf
+
+
+```
+
+
+### Project Name
+
+```{r}
+name_tidy <- Df %>%
+  #Break down name sentence into words
+  unnest_tokens("Word", "name") %>%
+  # Eliminate all the determiners and conjunctions, adverbs and adjectives
+  anti_join(stop_words, by = c("Word" = "word")) %>%
+  #Prevent 's words to be taken as separate word
+  mutate(Word = str_replace(Word, "'s", ""))
+
+#Replace accented characters with unnaccented counterparts. Otherwise, for example, ó is seen as a word. 
+name_tidy <- name_tidy %>%  
+ mutate_if(is.character,
+           function(col) iconv(col, to='ASCII//TRANSLIT'))
+
+#Test function with some basic analysis
+# Top 5 Word frequency per state
+name_tidy %>%
+  group_by(state) %>%
+  word_frequency(10) %>% 
+  ggplot(mapping = aes(x = Word, y = n, fill = state)) +
+  geom_col(show.legend = FALSE) +
+  labs(x = NULL, y = NULL) +
+  coord_flip() +
+  facet_wrap(~ state, scales = "free")
+
+# Analysis based on TF-IFD
+name_tf_idf <-
+  name_tidy %>%
+  count(state, Word, sort = TRUE) %>%
+  bind_tf_idf(Word, state, n)
+
+name_tf_idf %>% 
+  arrange(desc(tf_idf)) %>% 
+  # We create the factors as we did previously
+  mutate(Word = factor(Word, levels = rev(unique(Word)))) %>%
+# Select just the top 10 words for each model
+  group_by(state) %>%
+  top_n(10) %>%
+  ungroup() %>%
+# Our Plot
+  ggplot(mapping = aes(x = Word, y = tf_idf, fill = state)) +
+  geom_col(show.legend = FALSE) +
+  labs(x = NULL, y = NULL) +
+  coord_flip() +
+  facet_wrap(~ state, scales = "free_y")
+#> Selecting by tf_idf
+```
+
+# 1.2 Further analyses
+
+## Data preparation
+```{r}
+
+#Further 'storytelling'  data analysis is carried out in POwer Bi
+
+#Export Df for Power Bi
+
+write.csv(Df, "C:\\Users\\luukg\\Desktop\\kickstarter_dataframe.csv", row.names = FALSE)
+```
+
+
+# 2. Predict succes of kickstart funding ~ Logistic regression(fails) & KNN
+
+# https://www.r-bloggers.com/2015/09/how-to-perform-a-logistic-regression-in-r/ 
+
+## Data preperation
+
+```{r}
+#New variable to keep Df intact. Remove unwanted columns
+training_data <- subset(Df, select = -c(blurb,name,pledged,deadline,launched_at))
+
+#state contains the outcomes i like to predict. It's type is character which needs to be transformed to factor
+training_data$state <- as.factor(training_data$state)
+
+#Also creating factors of character columns
+training_data$country <- as.factor(training_data$country)
+training_data$currency <- as.factor(training_data$currency)
+training_data$category <- as.factor(training_data$category)
+training_data$DateDiff <- as.numeric(training_data$DateDiff)
+summary(training_data)
+
+#Create dummy columns to have numeric values 
+training_data_dummy <- dummy_cols(training_data, select_columns = c("country", "category"))
+
+#Remove those columns to exclude character values for modeling
+training_data_dummy <- subset(training_data_dummy, select = -c(country, category,currency))
+
+
+
+```
+
+#Modeling with Logistic Regression
+
+```{r}
+#Create test and train set 70%train 30%test
+set.seed(123)
+dt = sort(sample(nrow(training_data),nrow(training_data)*.7)) #https://www.listendata.com/2015/02/splitting-data-into-training-and-test.html
+
+train <- training_data[dt,]
+test <- training_data[-dt,]
+
+
+model1 <- glm(state ~. , family = binomial(link = 'logit'), data = train)
+
+summary(model1)
+# Currency can be excluded due singularities 
+
+model2 <- glm(state ~ goal  + country + category + DateDiff, family = "binomial", data = train)
+summary(model2)
+
+
+#Assessing the predictive ability of the model
+fitted.results <- predict(model2, newdata = test, type = "response" )
+fitted.results <- ifelse(fitted.results > 0.5,1,0)
+
+misClasificError <- mean(fitted.results != test$state)
+print(paste('Accuracy',1-misClasificError)) # Accuracy = 0
+
+#Based on the result this model is bad at predicting if a project will succeed or fail 
+
+#Predict
+state_prediction <- data.frame(goal = 9999, country = "HK", category = "Apps" , DateDiff = 14)
+
+prediction <- predict(model2, newdata = state_prediction, type = "response")
+
+predicted_state <- ifelse(prediction > 0.5, "successful", "failed")
+
+predicted_state
+
+```
+
+#KNN
+
+## Data preparation - KNN
+```{r}
+
+#Name, blurb and both date attributes can't be included in the KNN model. Pledged isn't logical by reconsideration 
+Df_KNN <- subset(Df, select = -c(blurb,name,pledged,deadline,launched_at))
+
+#state contains the outcomes i like to predict. It's type is character which needs to be transformed to factor
+Df_KNN$state <- as.factor(Df_KNN$state)
+
+# And Difftime to numeric
+Df_KNN$DateDiff <- as.numeric(Df_KNN$DateDiff)
+
+#check form if normalisation is neccesary
+summary(Df_KNN[c("goal", "DateDiff")])
+
+# Ranges are very different. Goal will have a larger impact then datediff, so normalization is needed
+
+Df_KNN <- dummy_cols(Df_KNN, select_columns = c("country", "currency", "category"))
+
+#Normalize ~ From FIDM class
+#Function
+normalize <- function(x) { # Function takes in a vector
+  return ((x - min(x)) / (max(x) - min(x))) # distance of item value - minimum vector value divided by the range of all vector values
+}
+
+#Create test and train set 70%train 30%test
+set.seed(123)
+dt = sort(sample(nrow(Df_KNN),nrow(Df_KNN)*.7)) #https://www.listendata.com/2015/02/splitting-data-into-training-and-test.html
+
+trainDf <- Df_KNN[dt,]
+testDf <- Df_KNN[-dt,]
+
+#Check for imbalance
+prop.table(table(trainDf$state)) # No imbalance
+# The upsample fucntion will increase the size of the minority class, without losing data. In this case the classes will have the same size
+trainDf_up <- upSample( x = trainDf %>% 
+                          select(-state),
+                        y = trainDf$state,
+                        list = F,
+                        yname = "state"
+)
+# check upsample result
+table(trainDf_up$state)
+
+#Remove non numeric columns except state for test and train_up dataframes
+trainDf_up <- select(trainDf_up, -c(currency, category, country))
+testDf <- select(testDf, -c(currency, category, country))
+```
+
+##Modeling - KNN
+```{r}
+#To use KNN the set needs scaling first, because KNN calculates the distance between the data therefor the range between the data must be the same.The scaling process is carried out using the z-score method and the scaling process only changes the scale of the data without changing the distribution of the initial data.
+#Scaling train data
+train_x <- trainDf_up %>%
+  select(-state) %>%
+  scale() 
+
+
+#Save variable
+train_y <- trainDf_up$state
+
+#Scaling test data
+test_x <- testDf %>%
+  select(-state) %>%
+  scale( center = attr(train_x, "scaled:center"),
+         scale = attr(train_x, "scaled:scale")
+  )
+
+#Save variable
+test_y <- testDf$state
+
+#The actual modeling with knn3
+pred_knn <- knn3Train(train = train_x,
+                      test = test_x,
+                      cl = train_y,
+                      #k = sqrt(nrow(train_x)) %>%
+                      k = 7 %>%
+                        round()) %>%
+  as.factor()
+
+
+confusionMatrix(pred_knn, test_y, positive = "successful") 
+
+CrossTable(pred_knn, test_y)
+
+#Predicting outcome with new input
+mytest <- testDf[1,-2]
+
+mytest$goal <- c(800)
+mytest$DateDiff <- 30
+
+#Set dummy columns back to zero first
+mytest$country_US <- 0
+mytest$currency_USD <- 0
+mytest$category_Blues <- 0
+
+#Set desired dummy column to 1
+mytest$country_NL <- 1
+mytest$currency_EUR <- 1
+mytest$category_Software <- 1
+
+#Run model
+KnnTestPrediction <- knn(trainDf_up %>% select(-state), mytest, trainDf_up$state, k = 5, prob = TRUE)
+
+#Result
+KnnTestPrediction
+
+
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
